@@ -4,7 +4,6 @@ use util::Operation;
 use crate::util::create_msq;
 
 const NUMBERS_TO_INSERT: usize = 1e6 as usize;
-const 
 
 fn main() {
     unsafe {
