@@ -6,15 +6,17 @@ use std::{
 };
 
 use libc::{
-    c_void, ftruncate, memset, mmap, pthread_cond_init, pthread_cond_signal, pthread_cond_t,
-    pthread_cond_wait, pthread_condattr_init, pthread_condattr_setpshared, pthread_condattr_t,
-    pthread_mutex_init, pthread_mutex_lock, pthread_mutex_t, pthread_mutex_unlock,
-    pthread_mutexattr_init, pthread_mutexattr_setpshared, pthread_mutexattr_t, shm_open,
-    MAP_SHARED, O_CREAT, O_RDWR, PROT_READ, PROT_WRITE, PTHREAD_PROCESS_SHARED, S_IRUSR, S_IWUSR,
+    c_void, ftruncate, memset, mmap, pthread_cond_broadcast, pthread_cond_init,
+    pthread_cond_signal, pthread_cond_t, pthread_cond_wait, pthread_condattr_init,
+    pthread_condattr_setpshared, pthread_condattr_t, pthread_mutex_init, pthread_mutex_lock,
+    pthread_mutex_t, pthread_mutex_unlock, pthread_mutexattr_init, pthread_mutexattr_setpshared,
+    pthread_mutexattr_t, shm_open, MAP_SHARED, O_CREAT, O_RDWR, PROT_READ, PROT_WRITE,
+    PTHREAD_PROCESS_SHARED, S_IRUSR, S_IWUSR,
 };
 
-const QUEUE_LEN: usize = 1024;
+const QUEUE_LEN: usize = 4096;
 const MEM_SIZE: usize = std::mem::size_of::<MessageQueue>();
+const DEFAULT_TABLE_SIZE: usize = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Message {
@@ -25,9 +27,24 @@ pub enum Message {
     No,
     Delete(usize),
     Print(usize),
-    ThStop,
     ThStart(usize),
+    ThStop,
     Quit,
+}
+
+pub fn get_size() -> usize {
+    let mut input = String::new();
+    println!("Enter the size of the Hashmap:");
+    std::io::stdin()
+        .read_line(&mut input)
+        .expect("failed to read line");
+    match input.trim().parse::<usize>() {
+        Ok(size) => size,
+        Err(_) => {
+            eprintln!("Invalid input, defaulting to {}", DEFAULT_TABLE_SIZE);
+            DEFAULT_TABLE_SIZE
+        }
+    }
 }
 
 pub struct HashTable {
