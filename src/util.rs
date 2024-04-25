@@ -1,7 +1,8 @@
 use std::{
-    ffi::c_char,
+    ffi::CString,
     hash::{DefaultHasher, Hash, Hasher},
     sync::RwLock,
+    usize,
 };
 
 use libc::{
@@ -9,25 +10,29 @@ use libc::{
     pthread_cond_wait, pthread_condattr_init, pthread_condattr_setpshared, pthread_condattr_t,
     pthread_mutex_init, pthread_mutex_lock, pthread_mutex_t, pthread_mutex_unlock,
     pthread_mutexattr_init, pthread_mutexattr_setpshared, pthread_mutexattr_t, shm_open,
-    shm_unlink, MAP_SHARED, O_CREAT, O_RDWR, PROT_READ, PROT_WRITE, PTHREAD_PROCESS_SHARED,
-    S_IRUSR, S_IWUSR,
+    MAP_SHARED, O_CREAT, O_RDWR, PROT_READ, PROT_WRITE, PTHREAD_PROCESS_SHARED, S_IRUSR, S_IWUSR,
 };
 
-const SHM_NAME: &str = "ipcmem";
-const QUEUE_LEN: usize = 100;
+const QUEUE_LEN: usize = 1024;
 const MEM_SIZE: usize = std::mem::size_of::<MessageQueue>();
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Operation {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Message {
     Nop,
     Insert(usize, usize),
     Read(usize),
+    Some(usize),
+    No,
     Delete(usize),
     Print(usize),
+    ThStop,
+    ThStart(usize),
     Quit,
 }
 
-pub struct HashTable(Vec<RwLock<Vec<(usize, usize)>>>);
+pub struct HashTable {
+    buckets: Vec<RwLock<Vec<(usize, usize)>>>,
+}
 
 impl HashTable {
     pub fn new(size: usize) -> Self {
@@ -36,26 +41,19 @@ impl HashTable {
             let bucket = RwLock::new(Vec::new());
             buckets.push(bucket);
         }
-        HashTable(buckets)
+        HashTable { buckets }
     }
 
-    //Inserts a new key - value pair into the HashTable, duplicates are not allowed
+    //Inserts a new key - value pair into the HashTable, duplicate keys are allowed
     pub fn insert(&self, key: usize, value: usize) {
         let mut bucket = self.get_bucket(key).write().unwrap();
-        if bucket.iter().position(|kv| kv.0 == key).is_some() {
-            eprintln!("Duplicate key, not inserting");
-        } else {
-            bucket.push((key, value));
-        }
+        bucket.push((key, value));
     }
 
-    //Deletes the specified key and its value from the HashTable
+    //Deletes all occurences of the specified key from the HashTable
     pub fn delete(&self, key: usize) {
         let mut bucket = self.get_bucket(key).write().unwrap();
-        match bucket.iter().position(|kv| kv.0 == key) {
-            None => return,
-            Some(index) => bucket.remove(index),
-        };
+        bucket.retain(|kv| kv.0 != key);
     }
 
     //Returns Some(value) if the key is present, else returns None
@@ -69,7 +67,7 @@ impl HashTable {
 
     //Prints the contents of the Bucket at the given index to stdout
     pub fn print(&self, index: usize) {
-        match self.0.get(index) {
+        match self.buckets.get(index) {
             None => println!("Bucket with the index {} does not exist", index),
             Some(lock) => {
                 println!("Bucket {}:", index);
@@ -82,8 +80,8 @@ impl HashTable {
     fn get_bucket(&self, key: usize) -> &RwLock<Vec<(usize, usize)>> {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
-        let index = hasher.finish() as usize % self.0.len();
-        self.0.get(index).unwrap()
+        let index = hasher.finish() as usize % self.buckets.len();
+        self.buckets.get(index).unwrap()
     }
 }
 
@@ -94,14 +92,14 @@ pub struct MessageQueue {
     nempty_attr: pthread_condattr_t,
     full: pthread_cond_t,
     full_attr: pthread_condattr_t,
-    queue: [Operation; QUEUE_LEN],
+    queue: [Message; QUEUE_LEN],
     tail: usize, //points to the first element to handle
     free: usize, //points to the first free slot
     len: usize,
 }
 
 impl MessageQueue {
-    pub unsafe fn enqueue(&mut self, op: Operation) {
+    pub unsafe fn enqueue(&mut self, op: Message) {
         let mutex = &mut (self.lock) as *mut pthread_mutex_t;
         let nempty = &mut (self.nempty) as *mut pthread_cond_t;
         let full = &mut (self.full) as *mut pthread_cond_t;
@@ -120,19 +118,19 @@ impl MessageQueue {
         pthread_cond_signal(nempty);
     }
 
-    pub unsafe fn dequeue(&mut self) -> Operation {
+    pub unsafe fn dequeue(&mut self) -> Message {
         let mutex = &mut (self.lock) as *mut pthread_mutex_t;
         let nempty = &mut (self.nempty) as *mut pthread_cond_t;
         let full = &mut (self.full) as *mut pthread_cond_t;
         pthread_mutex_lock(mutex);
         let msg = loop {
-            if self.queue[self.tail] != Operation::Nop {
+            if self.queue[self.tail] != Message::Nop {
                 break self.queue[self.tail];
             } else {
                 pthread_cond_wait(nempty, mutex);
             }
         };
-        self.queue[self.tail] = Operation::Nop;
+        self.queue[self.tail] = Message::Nop;
         self.tail = (self.tail + 1) % QUEUE_LEN;
         self.len -= 1;
         pthread_mutex_unlock(mutex);
@@ -141,12 +139,13 @@ impl MessageQueue {
     }
 }
 
-pub(crate) unsafe fn create_msq(server: bool) -> *mut MessageQueue {
-    let fd = shm_open(
-        String::from(SHM_NAME).as_ptr() as *mut c_char,
-        O_CREAT | O_RDWR,
-        S_IRUSR | S_IWUSR,
-    );
+pub unsafe fn create_msq(server: bool, to_server: bool) -> *mut MessageQueue {
+    let name = CString::new(if to_server { "to_server" } else { "to_client" }).unwrap();
+    let fd = if !to_server {
+        shm_open(name.as_ptr(), O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+    } else {
+        shm_open(name.as_ptr(), O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+    };
     ftruncate(fd, MEM_SIZE as i64);
     let addr = mmap(
         std::ptr::null_mut(),
@@ -178,8 +177,4 @@ pub(crate) unsafe fn create_msq(server: bool) -> *mut MessageQueue {
         (*addr).len = 0;
     }
     addr
-}
-
-pub unsafe fn destroy_shm() {
-    shm_unlink(String::from(SHM_NAME).as_ptr() as *mut c_char);
 }
