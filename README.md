@@ -13,10 +13,10 @@ Each routine is run 5 times with the number of requested worker threads doubling
 
 Known problems:
 
-    Bad scalability:
+Bad scalability:
     Despite the multithreading capabilities of the server, the whole setup is fundamentally limited by the single-threaded nature of the client. The messages can not be enqueued fast enough so that all server threads are working at full capacity. Therefore, there is no speedup or even slowdown for more than 4 threads, as the threads are only waiting for work and blocking each other.
 
-    Sequential reads: 
+Sequential reads: 
     As every read has to wait for a response from the server via the message queue, sequential reads can only be enqueued after the response to the previous read is received. This severely limits the speed at which sequential reads can be processed. 
     A potential solution could be asynchronous communication using some sort of ID system.
 
