@@ -33,6 +33,6 @@ How to test:
 2. run the client by running: <console>
 > cargo run --bin client </console>
 >
-1. (Optional): Change the <code>client.rs</code> file to adjust the test parameters.
+1. (Optional): Change the <code>client.rs</code> file to adjust the test parameters or create new tests. 
 
  
