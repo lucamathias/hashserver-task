@@ -33,8 +33,8 @@ unsafe fn worker(incoming_ptr: usize, outgoing_ptr: usize, table: Arc<HashTable>
             Message::Read(k) => {
                 let value = table.read(k);
                 let msg = match value {
-                    None => Message::No,
-                    Some(v) => Message::Some(v),
+                    None => Message::Fail,
+                    Some(v) => Message::Value(v),
                 };
                 (*out_ptr).enqueue(msg);
             }

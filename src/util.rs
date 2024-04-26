@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     ffi::CString,
     hash::{DefaultHasher, Hash, Hasher},
     sync::RwLock,
@@ -6,25 +7,24 @@ use std::{
 };
 
 use libc::{
-    c_void, ftruncate, memset, mmap, pthread_cond_broadcast, pthread_cond_init,
-    pthread_cond_signal, pthread_cond_t, pthread_cond_wait, pthread_condattr_init,
-    pthread_condattr_setpshared, pthread_condattr_t, pthread_mutex_init, pthread_mutex_lock,
-    pthread_mutex_t, pthread_mutex_unlock, pthread_mutexattr_init, pthread_mutexattr_setpshared,
-    pthread_mutexattr_t, shm_open, MAP_SHARED, O_CREAT, O_RDWR, PROT_READ, PROT_WRITE,
-    PTHREAD_PROCESS_SHARED, S_IRUSR, S_IWUSR,
+    c_void, ftruncate, memset, mmap, pthread_cond_init, pthread_cond_signal, pthread_cond_t,
+    pthread_cond_wait, pthread_condattr_init, pthread_condattr_setpshared, pthread_condattr_t,
+    pthread_mutex_init, pthread_mutex_lock, pthread_mutex_t, pthread_mutex_unlock,
+    pthread_mutexattr_init, pthread_mutexattr_setpshared, pthread_mutexattr_t, shm_open,
+    MAP_SHARED, O_CREAT, O_RDWR, PROT_READ, PROT_WRITE, PTHREAD_PROCESS_SHARED, S_IRUSR, S_IWUSR,
 };
 
 const QUEUE_LEN: usize = 4096;
 const MEM_SIZE: usize = std::mem::size_of::<MessageQueue>();
-const DEFAULT_TABLE_SIZE: usize = 1000;
+const DEFAULT_TABLE_SIZE: usize = 5000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Message {
-    Nop,
+    Empty,
     Insert(usize, usize),
     Read(usize),
-    Some(usize),
-    No,
+    Value(usize),
+    Fail,
     Delete(usize),
     Print(usize),
     ThStart(usize),
@@ -48,14 +48,14 @@ pub fn get_size() -> usize {
 }
 
 pub struct HashTable {
-    buckets: Vec<RwLock<Vec<(usize, usize)>>>,
+    buckets: Vec<RwLock<VecDeque<(usize, usize)>>>,
 }
 
 impl HashTable {
     pub fn new(size: usize) -> Self {
         let mut buckets = Vec::new();
         for _ in 0..size {
-            let bucket = RwLock::new(Vec::new());
+            let bucket = RwLock::new(VecDeque::new());
             buckets.push(bucket);
         }
         HashTable { buckets }
@@ -64,7 +64,7 @@ impl HashTable {
     //Inserts a new key - value pair into the HashTable, duplicate keys are allowed
     pub fn insert(&self, key: usize, value: usize) {
         let mut bucket = self.get_bucket(key).write().unwrap();
-        bucket.push((key, value));
+        bucket.push_front((key, value));
     }
 
     //Deletes all occurences of the specified key from the HashTable
@@ -94,7 +94,7 @@ impl HashTable {
         }
     }
 
-    fn get_bucket(&self, key: usize) -> &RwLock<Vec<(usize, usize)>> {
+    fn get_bucket(&self, key: usize) -> &RwLock<VecDeque<(usize, usize)>> {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         let index = hasher.finish() as usize % self.buckets.len();
@@ -105,51 +105,48 @@ impl HashTable {
 pub struct MessageQueue {
     lock: pthread_mutex_t,
     mattr: pthread_mutexattr_t,
-    nempty: pthread_cond_t,
-    nempty_attr: pthread_condattr_t,
-    full: pthread_cond_t,
+    empty: pthread_cond_t, //signals that the queue is not empty
+    empty_attr: pthread_condattr_t,
+    full: pthread_cond_t, //signals that the queue is not full
     full_attr: pthread_condattr_t,
     queue: [Message; QUEUE_LEN],
     tail: usize, //points to the first element to handle
     free: usize, //points to the first free slot
-    len: usize,
 }
 
 impl MessageQueue {
     pub unsafe fn enqueue(&mut self, op: Message) {
         let mutex = &mut (self.lock) as *mut pthread_mutex_t;
-        let nempty = &mut (self.nempty) as *mut pthread_cond_t;
+        let empty = &mut (self.empty) as *mut pthread_cond_t;
         let full = &mut (self.full) as *mut pthread_cond_t;
         pthread_mutex_lock(mutex);
         loop {
-            if self.len < QUEUE_LEN {
+            if self.queue[self.free] == Message::Empty {
                 self.queue[self.free] = op;
                 self.free = (self.free + 1) % QUEUE_LEN;
-                self.len += 1;
                 break;
             } else {
                 pthread_cond_wait(full, mutex);
             }
         }
         pthread_mutex_unlock(mutex);
-        pthread_cond_signal(nempty);
+        pthread_cond_signal(empty);
     }
 
     pub unsafe fn dequeue(&mut self) -> Message {
         let mutex = &mut (self.lock) as *mut pthread_mutex_t;
-        let nempty = &mut (self.nempty) as *mut pthread_cond_t;
+        let empty = &mut (self.empty) as *mut pthread_cond_t;
         let full = &mut (self.full) as *mut pthread_cond_t;
         pthread_mutex_lock(mutex);
         let msg = loop {
-            if self.queue[self.tail] != Message::Nop {
+            if self.queue[self.tail] != Message::Empty {
                 break self.queue[self.tail];
             } else {
-                pthread_cond_wait(nempty, mutex);
+                pthread_cond_wait(empty, mutex);
             }
         };
-        self.queue[self.tail] = Message::Nop;
+        self.queue[self.tail] = Message::Empty;
         self.tail = (self.tail + 1) % QUEUE_LEN;
-        self.len -= 1;
         pthread_mutex_unlock(mutex);
         pthread_cond_signal(full);
         msg
@@ -176,22 +173,21 @@ pub unsafe fn create_msq(server: bool, to_server: bool) -> *mut MessageQueue {
         memset(addr as *mut c_void, 0, MEM_SIZE);
         let mattr = &mut (*addr).mattr as *mut pthread_mutexattr_t;
         let mutex = &mut (*addr).lock as *mut pthread_mutex_t;
-        let nempty_attr = &mut (*addr).nempty_attr as *mut pthread_condattr_t;
-        let nempty = &mut (*addr).nempty as *mut pthread_cond_t;
+        let empty_attr = &mut (*addr).empty_attr as *mut pthread_condattr_t;
+        let emtpy = &mut (*addr).empty as *mut pthread_cond_t;
         let full = &mut (*addr).full as *mut pthread_cond_t;
         let full_attr = &mut (*addr).full_attr as *mut pthread_condattr_t;
         pthread_mutexattr_init(mattr);
         pthread_mutexattr_setpshared(mattr, PTHREAD_PROCESS_SHARED);
         pthread_mutex_init(mutex, mattr);
-        pthread_condattr_init(nempty_attr);
-        pthread_condattr_setpshared(nempty_attr, PTHREAD_PROCESS_SHARED);
-        pthread_cond_init(nempty, nempty_attr);
+        pthread_condattr_init(empty_attr);
+        pthread_condattr_setpshared(empty_attr, PTHREAD_PROCESS_SHARED);
+        pthread_cond_init(emtpy, empty_attr);
         pthread_condattr_init(full_attr);
         pthread_condattr_setpshared(full_attr, PTHREAD_PROCESS_SHARED);
         pthread_cond_init(full, full_attr);
         (*addr).free = 0;
         (*addr).tail = 0;
-        (*addr).len = 0;
     }
     addr
 }
