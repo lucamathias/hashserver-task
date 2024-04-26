@@ -4,7 +4,9 @@ The communication between the client and the server happens via a MessageQueue l
 
 Server:
 
-The server keeps a hash table, storing key-value pairs (both <code>usize</code> in this example), in which collisions are avoided using buckets. The amount of buckets in the table is asked from the user at startup. To make multithreaded operations on the HashTable possible, each bucket possesses a read-write lock. The server creates two shared memory regions, one to receive messages and one to send back responses. It then spawns a worker thread to dequeue incoming messages and perform the specified operations. If an operation requires a response, e.g., the <code>Read(key)</code> operation, it will enqueue the response in the outgoing message queue. The client can request n additional worker threads by sending <code>ThStart(n)</code> message or stop a thread by sending the <code>ThStop</code> message. The thread scaling is limited by the message queue, however, as it is locked by a mutex and therefore bottlenecks the speed at which new messages can be picked up.
+The server keeps a hash table, storing key-value pairs (both <code>usize</code> in this example), in which collisions are avoided using buckets. The amount of buckets in the table is asked from the user at startup. To make multithreaded operations on the HashTable possible, each bucket possesses a read-write lock. The server creates two shared memory regions, one to receive messages and one to send back responses. It then spawns a worker thread to dequeue incoming messages and perform the specified operations. If an operation requires a response, e.g., the <code>Read(key)</code> operation, it will enqueue the response in the outgoing message queue. The client can request n additional worker threads by sending <code>ThStart(n)</code> message or stop a thread by sending the <code>ThStop</code> message. The thread scaling is limited by the message queue, however, as it is locked by a mutex and therefore bottlenecks the speed at which new messages can be picked up.The server supports the following operations:
+<code>Insert(key, value), Read(key), Delete(key), Print(index), ThStart(n), ThStop, Quit
+</code>
 
 Client:
 
@@ -15,6 +17,7 @@ Known problems:
 
     Bad scalability:
     Despite the multithreading capabilities of the server, the whole setup is fundamentally limited by the single-threaded nature of the client. The messages can not be enqueued fast enough so that all server threads are working at full capacity. Therefore, there is no speedup or even slowdown for more than 4 threads, as the threads are only waiting for work and blocking each other.
+    A potential solution could be to design a multi-threaded client.
 
     Sequential reads: 
     As every read has to wait for a response from the server via the message queue, sequential reads can only be enqueued after the response to the previous read is received. This severely limits the speed at which sequential reads can be processed. 
@@ -26,7 +29,7 @@ How to test:
 > cargo build
 2. start the server by running: 
 > cargo run --bin server
-3. Enter the desired number of buckets for the hash table (default: 1000). Small values severely impact performance if the number of inserted items is large.
+3. Enter the desired number of buckets for the hash table (default: 5000). Small values severely impact performance if the number of inserted items is large.
 2. run the client by running: <console>
 > cargo run --bin client </console>
 >

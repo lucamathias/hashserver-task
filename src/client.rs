@@ -112,7 +112,7 @@ unsafe fn test_sequential_d(outgoing: *mut MessageQueue) -> (bool, Duration) {
     (true, now.elapsed())
 }
 
-//inserts NUM_TO_INSERT random key value pairs, chooses 10 at random and checks if they are correctly stored.
+//inserts NUM_ITEMS random key value pairs, chooses 10 at random and checks if they are correctly stored.
 //Then deletes 10 at random and checks if they are no longer present
 unsafe fn test_random_ird(outgoing: *mut MessageQueue) -> (bool, Duration) {
     let mut keys = Vec::new();

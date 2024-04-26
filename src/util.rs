@@ -16,35 +16,19 @@ use libc::{
 
 const QUEUE_LEN: usize = 4096;
 const MEM_SIZE: usize = std::mem::size_of::<MessageQueue>();
-const DEFAULT_TABLE_SIZE: usize = 5000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Message {
-    Empty,
-    Insert(usize, usize),
-    Read(usize),
-    Value(usize),
-    Fail,
-    Delete(usize),
-    Print(usize),
-    ThStart(usize),
-    ThStop,
-    Quit,
-}
-
-pub fn get_size() -> usize {
-    let mut input = String::new();
-    println!("Enter the size of the Hashmap:");
-    std::io::stdin()
-        .read_line(&mut input)
-        .expect("failed to read line");
-    match input.trim().parse::<usize>() {
-        Ok(size) => size,
-        Err(_) => {
-            eprintln!("Invalid input, defaulting to {}", DEFAULT_TABLE_SIZE);
-            DEFAULT_TABLE_SIZE
-        }
-    }
+    Empty,                //placeholder for an empty space in the message queue
+    Insert(usize, usize), //inserts a key value pair
+    Read(usize),          //gets the value assosiated with a key.
+    Value(usize),         //positive response to the Read message
+    Fail,                 //negative response to the Read message
+    Delete(usize),        //deletes all key-value pairs with this key
+    Print(usize),         //prints the bucket at the index
+    ThStart(usize),       //starts n worker threads
+    ThStop,               //stops the thread that receives the message
+    Quit,                 //stops the server
 }
 
 pub struct HashTable {
@@ -102,6 +86,7 @@ impl HashTable {
     }
 }
 
+//A message queue for communication through a segment of shared memory, works like a ring buffer.
 pub struct MessageQueue {
     lock: pthread_mutex_t,
     mattr: pthread_mutexattr_t,
@@ -115,6 +100,7 @@ pub struct MessageQueue {
 }
 
 impl MessageQueue {
+    //enqueues a message in the message queue, if the queue is full, wait until it is not.
     pub unsafe fn enqueue(&mut self, op: Message) {
         let mutex = &mut (self.lock) as *mut pthread_mutex_t;
         let empty = &mut (self.empty) as *mut pthread_cond_t;
@@ -133,6 +119,7 @@ impl MessageQueue {
         pthread_cond_signal(empty);
     }
 
+    //dequeues a message from the message queue, if the queue is empty, wait until it is not
     pub unsafe fn dequeue(&mut self) -> Message {
         let mutex = &mut (self.lock) as *mut pthread_mutex_t;
         let empty = &mut (self.empty) as *mut pthread_cond_t;
@@ -153,6 +140,7 @@ impl MessageQueue {
     }
 }
 
+//sets up a segment of POSIX shared memory and initializes it as a MessageQueue
 pub unsafe fn create_msq(server: bool, to_server: bool) -> *mut MessageQueue {
     let name = CString::new(if to_server { "to_server" } else { "to_client" }).unwrap();
     let fd = if !to_server {
