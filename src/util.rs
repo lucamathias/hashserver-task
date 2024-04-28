@@ -11,15 +11,16 @@ use std::{
 };
 
 use libc::{
-    exit, ftruncate, mmap, pthread_cond_init, pthread_cond_signal, pthread_cond_t,
-    pthread_cond_wait, pthread_condattr_init, pthread_condattr_setpshared, pthread_condattr_t,
-    pthread_mutex_init, pthread_mutex_lock, pthread_mutex_t, pthread_mutex_trylock,
-    pthread_mutex_unlock, pthread_mutexattr_init, pthread_mutexattr_setpshared,
-    pthread_mutexattr_t, shm_open, MAP_SHARED, O_CREAT, O_RDWR, PROT_READ, PROT_WRITE,
-    PTHREAD_PROCESS_SHARED, S_IRUSR, S_IWUSR,
+    ftruncate, mmap, pthread_cond_broadcast, pthread_cond_init, pthread_cond_signal,
+    pthread_cond_t, pthread_cond_wait, pthread_condattr_init, pthread_condattr_setpshared,
+    pthread_condattr_t, pthread_mutex_init, pthread_mutex_lock, pthread_mutex_t,
+    pthread_mutex_trylock, pthread_mutex_unlock, pthread_mutexattr_init,
+    pthread_mutexattr_setpshared, pthread_mutexattr_t, shm_open, MAP_SHARED, O_CREAT, O_RDWR,
+    PROT_READ, PROT_WRITE, PTHREAD_PROCESS_SHARED, S_IRUSR, S_IWUSR,
 };
 
-pub const THREAD_NUM: usize = 4;
+pub const THREAD_NUM: usize = 6;
+
 const FIELD_SIZE: usize = std::mem::size_of::<MessageField>();
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
@@ -33,9 +34,6 @@ pub enum Operation {
     Fail,                 //negative response to the Read message
     Delete(usize),        //deletes all key-value pairs with this key (key)
     Print(usize),         //prints the bucket at the index (index)
-    ThStart(usize),       //starts n worker threads (n)
-    Sync(usize),          //synchronizes the sequence(seq)
-    ThStop,               //stops the thread that receives the message
     Quit,                 //stops the server
 }
 
@@ -97,6 +95,7 @@ impl HashTable {
         self.buckets.get(index).unwrap()
     }
 }
+
 pub struct OperationSlot {
     lock: pthread_mutex_t,
     lock_attr: pthread_mutexattr_t,
@@ -110,33 +109,31 @@ pub struct OperationSlot {
 
 impl OperationSlot {
     fn perform_work(&mut self, ht: Arc<HashTable>) {
-        unsafe {
-            match self.op {
-                Operation::Insert(k, v) => {
-                    ht.insert(k, v);
-                    self.op = Operation::Empty;
-                }
-                Operation::Delete(k) => {
-                    ht.delete(k);
-                    self.op = Operation::Empty;
-                }
-                Operation::Read(k) => match ht.read(k) {
-                    Some(v) => {
-                        self.op = Operation::Value(v);
-                        self.has_result = true;
-                    }
-                    None => {
-                        self.op = Operation::Fail;
-                        self.has_result = true;
-                    }
-                },
-                Operation::Print(i) => {
-                    ht.print(i);
-                    self.op = Operation::Empty;
-                }
-                Operation::Quit => exit(0),
-                _ => self.op = Operation::Empty,
+        match self.op {
+            Operation::Insert(k, v) => {
+                ht.insert(k, v);
+                self.op = Operation::Empty;
             }
+            Operation::Delete(k) => {
+                ht.delete(k);
+                self.op = Operation::Empty;
+            }
+            Operation::Read(k) => match ht.read(k) {
+                Some(v) => {
+                    self.op = Operation::Value(v);
+                    self.has_result = true;
+                }
+                None => {
+                    self.op = Operation::Fail;
+                    self.has_result = true;
+                }
+            },
+            Operation::Print(i) => {
+                ht.print(i);
+                self.op = Operation::Empty;
+            }
+            Operation::Quit => std::process::exit(0),
+            _ => self.op = Operation::Empty,
         }
     }
 }
@@ -148,35 +145,34 @@ pub struct MessageField {
 impl MessageField {
     pub fn get_work(&mut self, ht: Arc<HashTable>, id: usize) {
         let slot = &mut self.slots[id];
-        unsafe {
-            loop {
-                pthread_mutex_lock(&mut slot.lock);
-                if slot.has_work && !slot.has_result && (SEQ.load(Acquire)) == slot.seq {
-                    let ht = ht.clone();
-                    slot.perform_work(ht);
-                    slot.has_work = false;
+        loop {
+            unsafe {
+                if pthread_mutex_trylock(&mut slot.lock) == 0 {
+                    if slot.has_work && !slot.has_result && (SEQ.load(Acquire)) == slot.seq {
+                        let ht = ht.clone();
+                        slot.perform_work(ht);
+                        slot.has_work = false;
+                    }
+                    pthread_mutex_unlock(&mut slot.lock);
                 }
-                pthread_mutex_unlock(&mut slot.lock);
             }
         }
     }
 
-    pub fn put_work(&mut self, op: Operation, seq: usize) -> usize {
+    pub fn put_work(&mut self, op: Operation, seq: usize, id: usize) -> usize {
         loop {
-            for i in 0..THREAD_NUM {
-                let slot: &mut OperationSlot = &mut self.slots[i];
-                unsafe {
-                    if pthread_mutex_trylock(&mut slot.lock) == 0 {
-                        if !slot.has_work && !slot.has_result {
-                            slot.op = op;
-                            slot.has_work = true;
-                            slot.seq = seq;
-                            pthread_mutex_unlock(&mut slot.lock);
-                            pthread_cond_signal(&mut slot.cond);
-                            return i;
-                        }
+            let slot = &mut self.slots[id];
+            unsafe {
+                if pthread_mutex_trylock(&mut slot.lock) == 0 {
+                    if !slot.has_work && !slot.has_result {
+                        slot.op = op;
+                        slot.has_work = true;
+                        slot.seq = seq;
                         pthread_mutex_unlock(&mut slot.lock);
+                        pthread_cond_broadcast(&mut slot.cond);
+                        return id;
                     }
+                    pthread_mutex_unlock(&mut slot.lock);
                 }
             }
         }
@@ -185,8 +181,8 @@ impl MessageField {
     pub fn pick_up_result(&mut self, index: usize) -> Operation {
         let slot = &mut self.slots[index];
         let op;
-        unsafe {
-            loop {
+        loop {
+            unsafe {
                 pthread_mutex_lock(&mut slot.lock);
                 if slot.has_result == true {
                     op = slot.op;

@@ -15,19 +15,18 @@ fn main() {
     );
     let msg_field = create_message_field(true);
     let tmp = msg_field as usize;
-    let mut threads = Vec::new();
 
+    let mut threads = Vec::new();
     for i in 0..THREAD_NUM {
         let table = hashtable.clone();
-        threads.push(spawn(move || worker(tmp, table, i)));
+        threads.push(spawn(move || spawn_worker(tmp, table, i)));
     }
-
     for thread in threads {
         thread.join().unwrap();
     }
 }
 
-fn worker(field: usize, table: Arc<HashTable>, id: usize) {
+fn spawn_worker(field: usize, table: Arc<HashTable>, id: usize) {
     let field = field as *mut MessageField;
     let ht = table.clone();
     loop {
