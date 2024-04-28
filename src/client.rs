@@ -1,97 +1,92 @@
 mod util;
-
-use std::collections::VecDeque;
-use std::sync::Condvar;
-use std::sync::Mutex;
-use std::thread::spawn;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use std::time::Instant;
 
 use libc::rand;
 use libc::srand;
-use util::Message;
-use util::MessageQueue;
 
-use util::create_msq;
+use util::{create_message_field, MessageField, Operation};
 
-const NUM_ITEMS: usize = 1e6 as usize;
-
-static mut IN_BUF: Mutex<VecDeque<Message>> = Mutex::new(VecDeque::new());
-static HAS_IN: Condvar = Condvar::new();
+const NUM_ITEMS: usize = 2e6 as usize;
+static SEQ: AtomicUsize = AtomicUsize::new(0);
 
 fn main() {
-    unsafe {
-        let outgoing = create_msq(false, true);
-        let incoming = create_msq(false, false);
-
-        //spawn one thread to dequeue responses, so that the main thread wont have to wait
-        let tmp = incoming as usize;
-        spawn(move || buffer_responses(tmp));
-
-        let mut n = 1;
-        println!();
-        //Run the tests for multiple thread numbers
-        let mut res;
-        while n <= 16 {
-            println!("Running tests using {} thread(s): ", n);
-            print!("Sequential Insert: ");
-            res = test_sequential_i(outgoing);
-            print!(
-                "{} in {:.2?}\n",
-                if res.0 { "passed" } else { "failed" },
-                res.1
-            );
-            print!("Sequenteial Read: ");
-            res = test_sequential_r(outgoing);
-            print!(
-                "{} in {:.2?}\n",
-                if res.0 { "passed" } else { "failed" },
-                res.1
-            );
-            print!("Sequential Delete: ");
-            res = test_sequential_d(outgoing);
-            print!(
-                "{} in {:.2?}\n",
-                if res.0 { "passed" } else { "failed" },
-                res.1
-            );
-            print!("Random Insert, Read, Delete: ");
-            res = test_random_ird(outgoing);
-            print!(
-                "{} in {:.2?}\n",
-                if res.0 { "passed" } else { "failed" },
-                res.1
-            );
-            //start new threads
-            (*outgoing).enqueue(Message::ThStart(n));
-            n *= 2;
-            println!();
-        }
-        (*outgoing).enqueue(Message::Quit);
-    }
+    let field = create_message_field(false);
+    let mut res;
+    print!("Sequential Insert: ");
+    res = test_sequential_i(field);
+    print!(
+        "{} in {:.2?}\n",
+        if res.0 { "passed" } else { "failed" },
+        res.1
+    );
+    print!("Sequential Read: ");
+    res = test_sequential_r(field);
+    print!(
+        "{} in {:.2?}\n",
+        if res.0 { "passed" } else { "failed" },
+        res.1
+    );
+    print!("Sequential Delete: ");
+    res = test_sequential_d(field);
+    print!(
+        "{} in {:.2?}\n",
+        if res.0 { "passed" } else { "failed" },
+        res.1
+    );
+    print!("Random insert check delete: ");
+    res = test_random_ird(field);
+    print!(
+        "{} in {:.2?}\n",
+        if res.0 { "passed" } else { "failed" },
+        res.1
+    );
+    put_work(field, Operation::Quit);
+    println!();
 }
 
-//inserts NUM_ITEMS sequentially
-unsafe fn test_sequential_i(outgoing: *mut MessageQueue) -> (bool, Duration) {
+fn put_work(field: *mut MessageField, op: Operation) -> usize {
+    unsafe { (*field).put_work(op, SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) }
+}
+
+fn pick_up(field: *mut MessageField, index: usize) -> Operation {
+    unsafe { (*field).pick_up_result(index) }
+}
+
+fn test_sequential_i(field: *mut MessageField) -> (bool, Duration) {
     let now = Instant::now();
     for i in 0..NUM_ITEMS {
-        (*outgoing).enqueue(Message::Insert(i, i * i));
+        put_work(field, Operation::Insert(i, i * i));
+        let index = put_work(field, Operation::Read(i));
+        match pick_up(field, index) {
+            Operation::Fail => {
+                eprintln!("Value not present! Fail");
+                return (false, now.elapsed());
+            }
+            Operation::Value(v) => {
+                if v != i * i {
+                    eprintln!("Wrong Value! Fail");
+                    return (false, now.elapsed());
+                }
+            }
+            _ => return (false, now.elapsed()),
+        }
     }
     (true, now.elapsed())
 }
 
-//checks for the presence of the inserted values sequentially
-unsafe fn test_sequential_r(outgoing: *mut MessageQueue) -> (bool, Duration) {
+// //checks for the presence of the inserted values sequentially
+fn test_sequential_r(field: *mut MessageField) -> (bool, Duration) {
     let now = Instant::now();
-
     for i in 0..NUM_ITEMS {
-        (*outgoing).enqueue(Message::Read(i));
-        match pop_msg() {
-            Message::Fail => {
+        let index = put_work(field, Operation::Read(i));
+        match pick_up(field, index) {
+            Operation::Fail => {
                 eprintln!("Value not present! Fail");
                 return (false, now.elapsed());
             }
-            Message::Value(v) => {
+            Operation::Value(v) => {
                 if v != i * i {
                     eprintln!("Wrong Value! Fail");
                     return (false, now.elapsed());
@@ -104,43 +99,41 @@ unsafe fn test_sequential_r(outgoing: *mut MessageQueue) -> (bool, Duration) {
 }
 
 //Delets the previously inserted values sequentially
-unsafe fn test_sequential_d(outgoing: *mut MessageQueue) -> (bool, Duration) {
+fn test_sequential_d(field: *mut MessageField) -> (bool, Duration) {
     let now = Instant::now();
     for i in 0..NUM_ITEMS {
-        (*outgoing).enqueue(Message::Delete(i));
+        put_work(field, Operation::Delete(i));
     }
     (true, now.elapsed())
 }
 
-//inserts NUM_ITEMS random key value pairs, chooses 10 at random and checks if they are correctly stored.
-//Then deletes 10 at random and checks if they are no longer present
-unsafe fn test_random_ird(outgoing: *mut MessageQueue) -> (bool, Duration) {
+fn test_random_ird(field: *mut MessageField) -> (bool, Duration) {
     let mut keys = Vec::new();
     let now = Instant::now();
 
     for _ in 0..NUM_ITEMS {
-        let key = rand() as usize;
+        let key = unsafe { rand() } as usize;
         keys.push(key);
-        (*outgoing).enqueue(Message::Insert(key, key / 2)); //value always key/2
+        put_work(field, Operation::Insert(key, key / 2)); //value always key/2
     }
 
     let mut rand_indices = Vec::new();
     for i in 0..10 {
-        srand(i);
-        rand_indices.push(rand() as usize);
+        unsafe { srand(i) };
+        rand_indices.push(unsafe { rand() } as usize);
     }
 
     //lookup 10 random keys and check values
     for ri in rand_indices {
         let index = ri % keys.len();
         let key = *keys.get(index).unwrap();
-        (*outgoing).enqueue(Message::Read(key));
-        match pop_msg() {
-            Message::Fail => {
+        let index = put_work(field, Operation::Read(key));
+        match pick_up(field, index) {
+            Operation::Fail => {
                 eprintln!("Value not present! Fail");
                 return (false, now.elapsed());
             }
-            Message::Value(v) => {
+            Operation::Value(v) => {
                 if v != key / 2 {
                     eprintln!("Wrong Value! Fail");
                     return (false, now.elapsed());
@@ -152,48 +145,26 @@ unsafe fn test_random_ird(outgoing: *mut MessageQueue) -> (bool, Duration) {
 
     let mut rand_indices = Vec::new();
     for i in 0..10 {
-        srand(i);
-        rand_indices.push(rand() as usize);
+        unsafe { srand(i) };
+        rand_indices.push(unsafe { rand() } as usize);
     }
 
     //Delete 10 random keys and check that they are not present anymore
     for ri in rand_indices {
         let index = ri % keys.len();
         let key = *keys.get(index).unwrap();
-        (*outgoing).enqueue(Message::Delete(key));
-        (*outgoing).enqueue(Message::Read(key));
-        match pop_msg() {
-            Message::Value(v) => {
+        put_work(field, Operation::Delete(key));
+        let index = put_work(field, Operation::Read(key));
+        match pick_up(field, index) {
+            Operation::Value(v) => {
                 if v != key / 2 {
                     eprintln!("Value still present! Fail");
                     return (false, now.elapsed());
                 }
             }
-            Message::Fail => {}
+            Operation::Fail => {}
             _ => return (false, now.elapsed()),
         }
     }
     (true, now.elapsed())
-}
-
-unsafe fn pop_msg() -> Message {
-    let mut guard = IN_BUF.lock().unwrap();
-    loop {
-        match guard.pop_front() {
-            None => guard = HAS_IN.wait(guard).unwrap(),
-            Some(msg) => {
-                break msg;
-            }
-        }
-    }
-}
-
-unsafe fn buffer_responses(incoming: usize) {
-    let incoming = incoming as *mut MessageQueue;
-    loop {
-        let msg = (*incoming).dequeue();
-        let mut guard = IN_BUF.lock().unwrap();
-        guard.push_back(msg);
-        HAS_IN.notify_one();
-    }
 }

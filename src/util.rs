@@ -1,45 +1,53 @@
+#![allow(unused)]
+
 use std::{
-    collections::VecDeque,
     ffi::CString,
     hash::{DefaultHasher, Hash, Hasher},
-    sync::RwLock,
+    sync::{
+        atomic::{AtomicUsize, Ordering::Acquire, Ordering::Release},
+        Arc, RwLock,
+    },
     usize,
 };
 
 use libc::{
-    c_void, ftruncate, memset, mmap, pthread_cond_init, pthread_cond_signal, pthread_cond_t,
+    exit, ftruncate, mmap, pthread_cond_init, pthread_cond_signal, pthread_cond_t,
     pthread_cond_wait, pthread_condattr_init, pthread_condattr_setpshared, pthread_condattr_t,
-    pthread_mutex_init, pthread_mutex_lock, pthread_mutex_t, pthread_mutex_unlock,
-    pthread_mutexattr_init, pthread_mutexattr_setpshared, pthread_mutexattr_t, shm_open,
-    MAP_SHARED, O_CREAT, O_RDWR, PROT_READ, PROT_WRITE, PTHREAD_PROCESS_SHARED, S_IRUSR, S_IWUSR,
+    pthread_mutex_init, pthread_mutex_lock, pthread_mutex_t, pthread_mutex_trylock,
+    pthread_mutex_unlock, pthread_mutexattr_init, pthread_mutexattr_setpshared,
+    pthread_mutexattr_t, shm_open, MAP_SHARED, O_CREAT, O_RDWR, PROT_READ, PROT_WRITE,
+    PTHREAD_PROCESS_SHARED, S_IRUSR, S_IWUSR,
 };
 
-const QUEUE_LEN: usize = 4096;
-const MEM_SIZE: usize = std::mem::size_of::<MessageQueue>();
+pub const THREAD_NUM: usize = 4;
+const FIELD_SIZE: usize = std::mem::size_of::<MessageField>();
+
+static SEQ: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Message {
+pub enum Operation {
     Empty,                //placeholder for an empty space in the message queue
-    Insert(usize, usize), //inserts a key value pair
-    Read(usize),          //gets the value assosiated with a key.
-    Value(usize),         //positive response to the Read message
+    Insert(usize, usize), //inserts a key value pair (key, value)
+    Read(usize),          //gets the value assosiated with a key. (key)
+    Value(usize),         //positive response to the Read message (value)
     Fail,                 //negative response to the Read message
-    Delete(usize),        //deletes all key-value pairs with this key
-    Print(usize),         //prints the bucket at the index
-    ThStart(usize),       //starts n worker threads
+    Delete(usize),        //deletes all key-value pairs with this key (key)
+    Print(usize),         //prints the bucket at the index (index)
+    ThStart(usize),       //starts n worker threads (n)
+    Sync(usize),          //synchronizes the sequence(seq)
     ThStop,               //stops the thread that receives the message
     Quit,                 //stops the server
 }
 
 pub struct HashTable {
-    buckets: Vec<RwLock<VecDeque<(usize, usize)>>>,
+    buckets: Vec<RwLock<Vec<(usize, usize)>>>,
 }
 
 impl HashTable {
     pub fn new(size: usize) -> Self {
         let mut buckets = Vec::new();
         for _ in 0..size {
-            let bucket = RwLock::new(VecDeque::new());
+            let bucket = RwLock::new(Vec::new());
             buckets.push(bucket);
         }
         HashTable { buckets }
@@ -48,18 +56,21 @@ impl HashTable {
     //Inserts a new key - value pair into the HashTable, duplicate keys are allowed
     pub fn insert(&self, key: usize, value: usize) {
         let mut bucket = self.get_bucket(key).write().unwrap();
-        bucket.push_front((key, value));
+        SEQ.fetch_add(1, Release);
+        bucket.push((key, value));
     }
 
     //Deletes all occurences of the specified key from the HashTable
     pub fn delete(&self, key: usize) {
         let mut bucket = self.get_bucket(key).write().unwrap();
+        SEQ.fetch_add(1, Release);
         bucket.retain(|kv| kv.0 != key);
     }
 
     //Returns Some(value) if the key is present, else returns None
     pub fn read(&self, key: usize) -> Option<usize> {
         let bucket = self.get_bucket(key).read().unwrap();
+        SEQ.fetch_add(1, Release);
         match bucket.iter().find(|kv| kv.0 == key) {
             None => None,
             Some(kv) => Some(kv.1),
@@ -73,109 +84,156 @@ impl HashTable {
             Some(lock) => {
                 println!("Bucket {}:", index);
                 let guard = lock.read().unwrap();
+                SEQ.fetch_add(1, Release);
                 guard.iter().for_each(|kv| println!("{:?}", kv));
             }
         }
     }
 
-    fn get_bucket(&self, key: usize) -> &RwLock<VecDeque<(usize, usize)>> {
+    fn get_bucket(&self, key: usize) -> &RwLock<Vec<(usize, usize)>> {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         let index = hasher.finish() as usize % self.buckets.len();
         self.buckets.get(index).unwrap()
     }
 }
-
-//A message queue for communication through a segment of shared memory, works like a ring buffer.
-pub struct MessageQueue {
+pub struct OperationSlot {
     lock: pthread_mutex_t,
-    mattr: pthread_mutexattr_t,
-    empty: pthread_cond_t, //signals that the queue is not empty
-    empty_attr: pthread_condattr_t,
-    full: pthread_cond_t, //signals that the queue is not full
-    full_attr: pthread_condattr_t,
-    queue: [Message; QUEUE_LEN],
-    tail: usize, //points to the first element to handle
-    free: usize, //points to the first free slot
+    lock_attr: pthread_mutexattr_t,
+    cond: pthread_cond_t,
+    cond_attr: pthread_condattr_t,
+    op: Operation,
+    seq: usize,
+    has_work: bool,
+    has_result: bool,
 }
 
-impl MessageQueue {
-    //enqueues a message in the message queue, if the queue is full, wait until it is not.
-    pub unsafe fn enqueue(&mut self, op: Message) {
-        let mutex = &mut (self.lock) as *mut pthread_mutex_t;
-        let empty = &mut (self.empty) as *mut pthread_cond_t;
-        let full = &mut (self.full) as *mut pthread_cond_t;
-        pthread_mutex_lock(mutex);
-        loop {
-            if self.queue[self.free] == Message::Empty {
-                self.queue[self.free] = op;
-                self.free = (self.free + 1) % QUEUE_LEN;
-                break;
-            } else {
-                pthread_cond_wait(full, mutex);
+impl OperationSlot {
+    fn perform_work(&mut self, ht: Arc<HashTable>) {
+        unsafe {
+            match self.op {
+                Operation::Insert(k, v) => {
+                    ht.insert(k, v);
+                    self.op = Operation::Empty;
+                }
+                Operation::Delete(k) => {
+                    ht.delete(k);
+                    self.op = Operation::Empty;
+                }
+                Operation::Read(k) => match ht.read(k) {
+                    Some(v) => {
+                        self.op = Operation::Value(v);
+                        self.has_result = true;
+                    }
+                    None => {
+                        self.op = Operation::Fail;
+                        self.has_result = true;
+                    }
+                },
+                Operation::Print(i) => {
+                    ht.print(i);
+                    self.op = Operation::Empty;
+                }
+                Operation::Quit => exit(0),
+                _ => self.op = Operation::Empty,
             }
         }
-        pthread_mutex_unlock(mutex);
-        pthread_cond_signal(empty);
-    }
-
-    //dequeues a message from the message queue, if the queue is empty, wait until it is not
-    pub unsafe fn dequeue(&mut self) -> Message {
-        let mutex = &mut (self.lock) as *mut pthread_mutex_t;
-        let empty = &mut (self.empty) as *mut pthread_cond_t;
-        let full = &mut (self.full) as *mut pthread_cond_t;
-        pthread_mutex_lock(mutex);
-        let msg = loop {
-            if self.queue[self.tail] != Message::Empty {
-                break self.queue[self.tail];
-            } else {
-                pthread_cond_wait(empty, mutex);
-            }
-        };
-        self.queue[self.tail] = Message::Empty;
-        self.tail = (self.tail + 1) % QUEUE_LEN;
-        pthread_mutex_unlock(mutex);
-        pthread_cond_signal(full);
-        msg
     }
 }
 
-//sets up a segment of POSIX shared memory and initializes it as a MessageQueue
-pub unsafe fn create_msq(server: bool, to_server: bool) -> *mut MessageQueue {
-    let name = CString::new(if to_server { "to_server" } else { "to_client" }).unwrap();
-    let fd = if !to_server {
-        shm_open(name.as_ptr(), O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
-    } else {
-        shm_open(name.as_ptr(), O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
-    };
-    ftruncate(fd, MEM_SIZE as i64);
-    let addr = mmap(
-        std::ptr::null_mut(),
-        MEM_SIZE,
-        PROT_READ | PROT_WRITE,
-        MAP_SHARED,
-        fd,
-        0,
-    ) as *mut MessageQueue;
-    if server {
-        memset(addr as *mut c_void, 0, MEM_SIZE);
-        let mattr = &mut (*addr).mattr as *mut pthread_mutexattr_t;
-        let mutex = &mut (*addr).lock as *mut pthread_mutex_t;
-        let empty_attr = &mut (*addr).empty_attr as *mut pthread_condattr_t;
-        let emtpy = &mut (*addr).empty as *mut pthread_cond_t;
-        let full = &mut (*addr).full as *mut pthread_cond_t;
-        let full_attr = &mut (*addr).full_attr as *mut pthread_condattr_t;
-        pthread_mutexattr_init(mattr);
-        pthread_mutexattr_setpshared(mattr, PTHREAD_PROCESS_SHARED);
-        pthread_mutex_init(mutex, mattr);
-        pthread_condattr_init(empty_attr);
-        pthread_condattr_setpshared(empty_attr, PTHREAD_PROCESS_SHARED);
-        pthread_cond_init(emtpy, empty_attr);
-        pthread_condattr_init(full_attr);
-        pthread_condattr_setpshared(full_attr, PTHREAD_PROCESS_SHARED);
-        pthread_cond_init(full, full_attr);
-        (*addr).free = 0;
-        (*addr).tail = 0;
+pub struct MessageField {
+    slots: [OperationSlot; THREAD_NUM],
+}
+
+impl MessageField {
+    pub fn get_work(&mut self, ht: Arc<HashTable>, id: usize) {
+        let slot = &mut self.slots[id];
+        unsafe {
+            loop {
+                pthread_mutex_lock(&mut slot.lock);
+                if slot.has_work && !slot.has_result && (SEQ.load(Acquire)) == slot.seq {
+                    let ht = ht.clone();
+                    slot.perform_work(ht);
+                    slot.has_work = false;
+                }
+                pthread_mutex_unlock(&mut slot.lock);
+            }
+        }
+    }
+
+    pub fn put_work(&mut self, op: Operation, seq: usize) -> usize {
+        loop {
+            for i in 0..THREAD_NUM {
+                let slot: &mut OperationSlot = &mut self.slots[i];
+                unsafe {
+                    if pthread_mutex_trylock(&mut slot.lock) == 0 {
+                        if !slot.has_work && !slot.has_result {
+                            slot.op = op;
+                            slot.has_work = true;
+                            slot.seq = seq;
+                            pthread_mutex_unlock(&mut slot.lock);
+                            pthread_cond_signal(&mut slot.cond);
+                            return i;
+                        }
+                        pthread_mutex_unlock(&mut slot.lock);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn pick_up_result(&mut self, index: usize) -> Operation {
+        let slot = &mut self.slots[index];
+        let op;
+        unsafe {
+            loop {
+                pthread_mutex_lock(&mut slot.lock);
+                if slot.has_result == true {
+                    op = slot.op;
+                    slot.op = Operation::Empty;
+                    slot.has_result = false;
+                    pthread_mutex_unlock(&mut slot.lock);
+                    pthread_cond_signal(&mut slot.cond);
+                    break;
+                }
+                pthread_mutex_unlock(&mut slot.lock);
+            }
+        }
+        op
+    }
+}
+
+pub fn create_message_field(server: bool) -> *mut MessageField {
+    let name = CString::new("msgfield").unwrap();
+    let addr;
+    unsafe {
+        let fd = shm_open(name.as_ptr(), O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+        ftruncate(fd, FIELD_SIZE as i64);
+        addr = mmap(
+            std::ptr::null_mut(),
+            FIELD_SIZE,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED,
+            fd,
+            0,
+        ) as *mut MessageField;
+        if server {
+            for slot in (*addr).slots.iter_mut() {
+                let attr = &mut (*slot).lock_attr;
+                let lock = &mut (*slot).lock;
+                let cond_attr = &mut (*slot).cond_attr;
+                let cond = &mut (*slot).cond;
+                pthread_mutexattr_init(attr);
+                pthread_mutexattr_setpshared(attr, PTHREAD_PROCESS_SHARED);
+                pthread_mutex_init(lock, attr);
+                pthread_condattr_init(cond_attr);
+                pthread_condattr_setpshared(cond_attr, PTHREAD_PROCESS_SHARED);
+                pthread_cond_init(cond, cond_attr);
+                slot.has_work = false;
+                slot.has_result = false;
+                slot.seq = 0;
+            }
+        }
     }
     addr
 }

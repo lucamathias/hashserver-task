@@ -34,5 +34,3 @@ How to test:
 > cargo run --bin client </console>
 >
 1. (Optional): Change the <code>client.rs</code> file to adjust the test parameters or create new tests. 
-
- 

@@ -1,10 +1,11 @@
 mod util;
 
-use std::{process::exit, sync::Arc, thread::spawn};
+use std::{sync::Arc, thread::spawn};
 
-use util::{create_msq, HashTable, Message, MessageQueue};
+use util::{create_message_field, HashTable, MessageField, THREAD_NUM};
 
 const DEFAULT_TABLE_SIZE: usize = 5000;
+
 fn main() {
     let size = get_size();
     let hashtable = Arc::new(HashTable::new(size));
@@ -12,47 +13,30 @@ fn main() {
         "HashTable of size {} created! Waiting for requests...",
         size
     );
-    unsafe {
-        let outgoing = create_msq(true, false);
-        let incoming = create_msq(true, true);
-        let tmp_out = outgoing as usize;
-        let tmp_in = incoming as usize;
+    let msg_field = create_message_field(true);
+    let tmp = msg_field as usize;
+    let mut threads = Vec::new();
+
+    for i in 0..THREAD_NUM {
         let table = hashtable.clone();
-        let _ = spawn(move || worker(tmp_in, tmp_out, table)).join();
+        threads.push(spawn(move || worker(tmp, table, i)));
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
     }
 }
 
-unsafe fn worker(incoming_ptr: usize, outgoing_ptr: usize, table: Arc<HashTable>) {
-    let in_ptr = incoming_ptr as *mut MessageQueue;
-    let out_ptr = outgoing_ptr as *mut MessageQueue;
+fn worker(field: usize, table: Arc<HashTable>, id: usize) {
+    let field = field as *mut MessageField;
+    let ht = table.clone();
     loop {
-        let table = table.clone();
-        let msg = (*in_ptr).dequeue();
-        match msg {
-            Message::Insert(k, v) => table.insert(k, v),
-            Message::Delete(k) => table.delete(k),
-            Message::Read(k) => {
-                let value = table.read(k);
-                let msg = match value {
-                    None => Message::Fail,
-                    Some(v) => Message::Value(v),
-                };
-                (*out_ptr).enqueue(msg);
-            }
-            Message::Print(i) => table.print(i),
-            Message::Quit => exit(0),
-            Message::ThStart(n) => {
-                for _ in 0..n {
-                    let table = table.clone();
-                    spawn(move || worker(incoming_ptr, outgoing_ptr, table));
-                }
-            }
-            Message::ThStop => break,
-            _ => {}
+        let ht = ht.clone();
+        unsafe {
+            (*field).get_work(ht, id);
         }
     }
 }
-
 //recieves the size input from the user
 fn get_size() -> usize {
     let mut input = String::new();
