@@ -19,18 +19,18 @@ The machine used in this test had 8 cores with 16 threads, as both the client an
 Test:\
  Inserting 1.000.000 sequential values, read them to check correct insertion, delete them and read them again to check correct deletion.
 
-1 thread: 9.49s \
-2 threads: 5.19s \
-4 threads: 3.46s \
-6 threads: 2.95s \
-8 threads: 4.09s 
+1 thread: 8.08s \
+2 threads: 4.26s \
+4 threads: 1.84s \
+6 threads: 1.30s \
+8 threads: 1.26s 
 
 Test: \
 Inserting 1.000.000 random values, delete 10 of them randomly, check that the deletion was successful and then check if all other values are still present.
 
 1 thread: 4.49s \
-2 threads: 2.85s \
-4 threads: 1.76s \
-6 threads: 1.48s \
-8 threads: 2.08s 
+2 threads: 2.60s \
+4 threads: 1.27s \
+6 threads: 0.95s \
+8 threads: 0.71s 
 
