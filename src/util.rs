@@ -17,7 +17,7 @@ use libc::{
     PROT_READ, PROT_WRITE, PTHREAD_PROCESS_SHARED, S_IRUSR, S_IWUSR,
 };
 
-pub const THREAD_NUM: usize = 8;
+pub const THREAD_NUM: usize = 4;
 
 const FIELD_SIZE: usize = std::mem::size_of::<MessageField>();
 
@@ -50,7 +50,7 @@ impl HashTable {
         HashTable { buckets }
     }
 
-    //Inserts a new key - value pair into the HashTable, duplicate keys are allowed
+    //Inserts a new key - value pair into the HashTable, duplicate keys are allowed but will all be deleted on delete(key)
     pub fn insert(&self, key: usize, value: usize) {
         let mut bucket = self.get_bucket(key).write().unwrap();
         SEQ.fetch_add(1, Release);
