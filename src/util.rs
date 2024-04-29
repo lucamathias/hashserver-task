@@ -11,15 +11,13 @@ use std::{
 };
 
 use libc::{
-    ftruncate, mmap, pthread_cond_broadcast, pthread_cond_init, pthread_cond_signal,
-    pthread_cond_t, pthread_cond_wait, pthread_condattr_init, pthread_condattr_setpshared,
-    pthread_condattr_t, pthread_mutex_init, pthread_mutex_lock, pthread_mutex_t,
+    ftruncate, mmap, pthread_mutex_init, pthread_mutex_lock, pthread_mutex_t,
     pthread_mutex_trylock, pthread_mutex_unlock, pthread_mutexattr_init,
     pthread_mutexattr_setpshared, pthread_mutexattr_t, shm_open, MAP_SHARED, O_CREAT, O_RDWR,
     PROT_READ, PROT_WRITE, PTHREAD_PROCESS_SHARED, S_IRUSR, S_IWUSR,
 };
 
-pub const THREAD_NUM: usize = 6;
+pub const THREAD_NUM: usize = 8;
 
 const FIELD_SIZE: usize = std::mem::size_of::<MessageField>();
 
@@ -42,6 +40,7 @@ pub struct HashTable {
 }
 
 impl HashTable {
+    //creates a new hashtable with size buckets
     pub fn new(size: usize) -> Self {
         let mut buckets = Vec::new();
         for _ in 0..size {
@@ -99,8 +98,6 @@ impl HashTable {
 pub struct OperationSlot {
     lock: pthread_mutex_t,
     lock_attr: pthread_mutexattr_t,
-    cond: pthread_cond_t,
-    cond_attr: pthread_condattr_t,
     op: Operation,
     seq: usize,
     has_work: bool,
@@ -169,7 +166,6 @@ impl MessageField {
                         slot.has_work = true;
                         slot.seq = seq;
                         pthread_mutex_unlock(&mut slot.lock);
-                        pthread_cond_broadcast(&mut slot.cond);
                         return id;
                     }
                     pthread_mutex_unlock(&mut slot.lock);
@@ -178,8 +174,9 @@ impl MessageField {
         }
     }
 
-    pub fn pick_up_result(&mut self, index: usize) -> Operation {
-        let slot = &mut self.slots[index];
+    //picks up the
+    pub fn pick_up_result(&mut self, id: usize) -> Operation {
+        let slot = &mut self.slots[id];
         let op;
         loop {
             unsafe {
@@ -189,7 +186,6 @@ impl MessageField {
                     slot.op = Operation::Empty;
                     slot.has_result = false;
                     pthread_mutex_unlock(&mut slot.lock);
-                    pthread_cond_signal(&mut slot.cond);
                     break;
                 }
                 pthread_mutex_unlock(&mut slot.lock);
@@ -199,6 +195,7 @@ impl MessageField {
     }
 }
 
+//creates and initializes the MessageField struct in POSIX shared memory.
 pub fn create_message_field(server: bool) -> *mut MessageField {
     let name = CString::new("msgfield").unwrap();
     let addr;
@@ -217,14 +214,9 @@ pub fn create_message_field(server: bool) -> *mut MessageField {
             for slot in (*addr).slots.iter_mut() {
                 let attr = &mut (*slot).lock_attr;
                 let lock = &mut (*slot).lock;
-                let cond_attr = &mut (*slot).cond_attr;
-                let cond = &mut (*slot).cond;
                 pthread_mutexattr_init(attr);
                 pthread_mutexattr_setpshared(attr, PTHREAD_PROCESS_SHARED);
                 pthread_mutex_init(lock, attr);
-                pthread_condattr_init(cond_attr);
-                pthread_condattr_setpshared(cond_attr, PTHREAD_PROCESS_SHARED);
-                pthread_cond_init(cond, cond_attr);
                 slot.has_work = false;
                 slot.has_result = false;
                 slot.seq = 0;

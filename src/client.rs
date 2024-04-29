@@ -28,7 +28,7 @@ fn main() {
         let tmp = field as usize;
         let sender_clone = sender.clone();
         thread::spawn(move || {
-            let result = test_sequential_ir(tmp, i);
+            let result = test_sequential_values(tmp, i);
             sender_clone.send(result).unwrap();
         });
     }
@@ -59,15 +59,18 @@ fn pick_up(field: *mut MessageField, index: usize) -> Operation {
     unsafe { (*field).pick_up_result(index) }
 }
 
-fn test_sequential_ir(field: usize, id: usize) -> (bool, Duration) {
+//inserts items, checks for their correct insertion, deletes them and then checks they are no longer present.
+fn test_sequential_values(field: usize, id: usize) -> (bool, Duration) {
     let now = Instant::now();
     let field = field as *mut MessageField;
     let start_index = id * SLICE_SIZE;
     let end_index = start_index + SLICE_SIZE;
+
+    //insert values and check that they are correctly inserted
     for i in start_index..end_index as usize {
         put_work(field, Operation::Insert(i, i * i), id);
-        let index = put_work(field, Operation::Read(i), id);
-        match pick_up(field, index) {
+        put_work(field, Operation::Read(i), id);
+        match pick_up(field, id) {
             Operation::Fail => {
                 eprintln!("Missing key-value pair! Fail");
                 return (false, now.elapsed());
@@ -79,6 +82,25 @@ fn test_sequential_ir(field: usize, id: usize) -> (bool, Duration) {
                 }
             }
             _ => return (false, now.elapsed()),
+        }
+    }
+
+    //delete values and check that they are deleted
+    for i in start_index..end_index {
+        put_work(field, Operation::Delete(i), id);
+        put_work(field, Operation::Read(i), id);
+        match pick_up(field, id) {
+            Operation::Value(v) => {
+                if v == i * i {
+                    eprintln!("Value that should have been deleted was present! Fail");
+                    return (false, now.elapsed());
+                }
+            }
+            Operation::Fail => {}
+            _ => {
+                eprintln!("Unexpected response! Fail!");
+                return (false, now.elapsed());
+            }
         }
     }
     (true, now.elapsed())
