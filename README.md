@@ -1,6 +1,6 @@
 This is a simple client-server experiment, where the server holds a hash table and the client can enqueue operations for the server to perform.
 
-The hash table holds key-value pairs (both integers in this example) and uses buckets to resolve hash collisions. The buckets are protected by read-write locks, making the hash table thread-safe. It supports the operations insert, delete, read and print.
+The hash table holds key-value pairs (both integers in this example) and uses buckets to resolve hash collisions. The buckets are protected by read-write locks, making the hash table thread-safe. It supports the operations insert, delete, read and print. Duplicate keys are allowed, but the delete operation will remove all key-value pairs with a given key. 
 
 How it works:
 
