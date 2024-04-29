@@ -16,20 +16,22 @@ Evaluation Numbers:
 
 The machine used in this test had 8 cores with 16 threads, as both the client and the server run a thread, a test with the number of threads set to 8 uses all available cores on the machine and therefore does perform worse due to conflicts with other computing load. All tests were conducted using the default number of 5000 buckets for the hash table.
 
-Test: Inserting 1.000.000 sequential values, read them to check correct insertion, delete them and read them again to check correct deletion
+Test:\
+ Inserting 1.000.000 sequential values, read them to check correct insertion, delete them and read them again to check correct deletion.
 
-1 thread: 9.49s
-2 threads: 5.19s
-4 threads: 3.46s
-6 threads: 2.95s
+1 thread: 9.49s \
+2 threads: 5.19s \
+4 threads: 3.46s \
+6 threads: 2.95s \
 8 threads: 4.09s 
 
-Test: Inserting 1.000.000 random values, delete 10 of them randomly, check that the deletion was successful and then check if all other values are still present
+Test: \
+Inserting 1.000.000 random values, delete 10 of them randomly, check that the deletion was successful and then check if all other values are still present.
 
-1 thread: 4.49s
-2 threads: 2.85s
-4 threads: 1.76s
-6 threads: 1.48s
+1 thread: 4.49s \
+2 threads: 2.85s \
+4 threads: 1.76s \
+6 threads: 1.48s \
 8 threads: 2.08s 
 
 
