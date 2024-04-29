@@ -11,13 +11,14 @@ use std::{
 };
 
 use libc::{
-    ftruncate, mmap, pthread_mutex_init, pthread_mutex_lock, pthread_mutex_t,
-    pthread_mutex_trylock, pthread_mutex_unlock, pthread_mutexattr_init,
-    pthread_mutexattr_setpshared, pthread_mutexattr_t, shm_open, MAP_SHARED, O_CREAT, O_RDWR,
-    PROT_READ, PROT_WRITE, PTHREAD_PROCESS_SHARED, S_IRUSR, S_IWUSR,
+    ftruncate, mmap, pthread_cond_init, pthread_cond_signal, pthread_cond_t, pthread_cond_wait,
+    pthread_condattr_init, pthread_condattr_setpshared, pthread_condattr_t, pthread_mutex_init,
+    pthread_mutex_lock, pthread_mutex_t, pthread_mutex_trylock, pthread_mutex_unlock,
+    pthread_mutexattr_init, pthread_mutexattr_setpshared, pthread_mutexattr_t, shm_open,
+    MAP_SHARED, O_CREAT, O_RDWR, PROT_READ, PROT_WRITE, PTHREAD_PROCESS_SHARED, S_IRUSR, S_IWUSR,
 };
 
-pub const THREAD_NUM: usize = 4;
+pub const THREAD_NUM: usize = 16;
 
 const FIELD_SIZE: usize = std::mem::size_of::<MessageField>();
 
@@ -98,6 +99,8 @@ impl HashTable {
 pub struct OperationSlot {
     lock: pthread_mutex_t,
     lock_attr: pthread_mutexattr_t,
+    cond: pthread_cond_t,
+    cond_attr: pthread_condattr_t,
     op: Operation,
     seq: usize,
     has_work: bool,
@@ -144,16 +147,16 @@ impl MessageField {
     //loops on the matching slot and actively waits for work, which is then performed
     pub fn get_work(&mut self, ht: Arc<HashTable>, id: usize) {
         let slot = &mut self.slots[id];
-        loop {
-            unsafe {
-                if pthread_mutex_trylock(&mut slot.lock) == 0 {
-                    if slot.has_work && !slot.has_result && (SEQ.load(Acquire)) == slot.seq {
-                        let ht = ht.clone();
-                        slot.perform_work(ht);
-                        slot.has_work = false;
-                    }
-                    pthread_mutex_unlock(&mut slot.lock);
+        unsafe {
+            pthread_mutex_lock(&mut slot.lock);
+            loop {
+                while !(slot.has_work && !slot.has_result && (SEQ.load(Acquire)) == slot.seq) {
+                    pthread_cond_wait(&mut slot.cond, &mut slot.lock);
+                    let ht = ht.clone();
+                    slot.perform_work(ht);
+                    slot.has_work = false;
                 }
+                pthread_mutex_unlock(&mut slot.lock);
             }
         }
     }
@@ -169,6 +172,7 @@ impl MessageField {
                         slot.has_work = true;
                         slot.seq = seq;
                         pthread_mutex_unlock(&mut slot.lock);
+                        pthread_cond_signal(&mut slot.cond);
                         return id;
                     }
                     pthread_mutex_unlock(&mut slot.lock);
@@ -220,6 +224,13 @@ pub fn create_message_field(server: bool) -> *mut MessageField {
                 pthread_mutexattr_init(attr);
                 pthread_mutexattr_setpshared(attr, PTHREAD_PROCESS_SHARED);
                 pthread_mutex_init(lock, attr);
+
+                let cond_attr = &mut (*slot).cond_attr;
+                let cond = &mut (*slot).cond;
+                pthread_condattr_init(cond_attr);
+                pthread_condattr_setpshared(cond_attr, PTHREAD_PROCESS_SHARED);
+                pthread_cond_init(cond, cond_attr);
+
                 slot.has_work = false;
                 slot.has_result = false;
                 slot.seq = 0;

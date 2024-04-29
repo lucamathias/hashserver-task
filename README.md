@@ -34,8 +34,3 @@ Inserting 1.000.000 random values, delete 10 of them randomly, check that the de
 6 threads: 1.48s \
 8 threads: 2.08s 
 
-
-Some potential improvements: 
-
-- Use condition variables to implement passive waiting on work.
-- Enable an n-to-m thread model.
