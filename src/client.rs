@@ -56,6 +56,7 @@ fn main() {
     println!();
 }
 
+//send work to the server thread with the same id
 fn put_work(field: *mut MessageField, op: Operation, id: usize) -> usize {
     unsafe {
         (*field).put_work(
@@ -66,6 +67,7 @@ fn put_work(field: *mut MessageField, op: Operation, id: usize) -> usize {
     }
 }
 
+//pick up the response from the server thread with the same id 
 fn pick_up(field: *mut MessageField, id: usize) -> Operation {
     unsafe { (*field).pick_up_result(id) }
 }

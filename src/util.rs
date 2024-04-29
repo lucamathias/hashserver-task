@@ -105,6 +105,7 @@ pub struct OperationSlot {
 }
 
 impl OperationSlot {
+    //Performs the matching operation on the hash table
     fn perform_work(&mut self, ht: Arc<HashTable>) {
         match self.op {
             Operation::Insert(k, v) => {
@@ -140,6 +141,7 @@ pub struct MessageField {
 }
 
 impl MessageField {
+    //loops on the matching slot and actively waits for work, which is then performed
     pub fn get_work(&mut self, ht: Arc<HashTable>, id: usize) {
         let slot = &mut self.slots[id];
         loop {
@@ -156,6 +158,7 @@ impl MessageField {
         }
     }
 
+    //puts a new operation inside a slot
     pub fn put_work(&mut self, op: Operation, seq: usize, id: usize) -> usize {
         loop {
             let slot = &mut self.slots[id];
@@ -174,7 +177,7 @@ impl MessageField {
         }
     }
 
-    //picks up the
+    //picks up the result from a slot
     pub fn pick_up_result(&mut self, id: usize) -> Operation {
         let slot = &mut self.slots[id];
         let op;
