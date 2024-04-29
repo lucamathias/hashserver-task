@@ -4,7 +4,7 @@ The hash table holds key-value pairs (both integers in this example) and uses bu
 
 How it works:
 
-The communication between the client and the server happens via POSIX shared memory in a n-to-n thread model. Each client thread communicates directly with one server thread through a shared slot in memory. The client writes operations to memory and the server reads and replaces them with the appropriate response (if a response is needed). The slot of memory is protected by a mutex to prevent race conditions. To preserve the sequence of operations, each operation is delivered together with a sequence number. This allows for concurrent execution of operations as long as all operations with lower sequence numbers have already acquired the lock for the bucket of the hashtable they will be operating on.
+The communication between the client and the server happens via POSIX shared memory in a n-to-n thread model. Each client thread communicates directly with one server thread through a shared slot in memory. The client writes operations to memory and the server reads and replaces them with the appropriate response (if a response is needed). The slot of memory is protected by a mutex to prevent race conditions and the server thread waits passively on the client thread to notify it about new work. To preserve the sequence of operations, each operation is delivered together with a sequence number. This allows for concurrent execution of operations as long as all operations with lower sequence numbers have already acquired the lock for the bucket of the hash table they will be operating on.
 
 How to test: 
 
